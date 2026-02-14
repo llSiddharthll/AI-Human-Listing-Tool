@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import json
 import logging
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +33,21 @@ def setup_logging(log_dir: Path) -> None:
             logging.StreamHandler(),
         ],
     )
+
+
+def sanitize_text(value: str) -> str:
+    return "".join(char for char in value if char.isprintable()).strip()
+
+
+def append_cache_event(cache_file: Path, event_type: str, payload: dict[str, Any]) -> None:
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    event = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event_type": event_type,
+        "payload": payload,
+    }
+    with cache_file.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
 def get_platform(platform_name: str, browser: BrowserEngine) -> PlatformBase:
@@ -69,7 +87,7 @@ def ensure_credentials(platform: str, manager: CredentialManager) -> dict[str, s
         return manager.get_credentials(platform)
     except KeyError:
         print(f"No encrypted credentials found for {platform}. Please provide them once.")
-        username = input("Username/email: ").strip()
+        username = sanitize_text(input("Username/email: "))
         password = getpass.getpass("Password (hidden): ").strip()
         credentials = {"username": username, "password": password}
         manager.save_credentials(platform, credentials)
@@ -161,6 +179,7 @@ def build_edit_tasks(products: list[dict[str, Any]], workflow: dict[str, Any]) -
 async def run() -> None:
     settings = Settings.from_env()
     setup_logging(settings.logs_dir)
+    cache_file = settings.sessions_dir / "user_action_cache" / "actions.jsonl"
 
     user_input = collect_user_inputs()
 

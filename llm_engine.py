@@ -53,7 +53,6 @@ class GeminiLLMEngine:
                 raise RuntimeError("LLM request failed") from retry_error
 
     def analyze_screen_with_llm(self, screenshot_path: Path, instruction: str) -> dict[str, Any]:
-        """Analyze current UI screenshot and return structured action JSON."""
         if not screenshot_path.exists():
             raise FileNotFoundError(f"Screenshot not found: {screenshot_path}")
 
@@ -76,11 +75,6 @@ Output JSON schema:
   "screen_state": "short description",
   "risk": "none|captcha|2fa|error|popup"
 }}
-
-Rules:
-- Always include at least one action.
-- Use done action if task appears complete.
-- If uncertain, include wait or scroll then re-check.
 """
         try:
             text = self._generate(
