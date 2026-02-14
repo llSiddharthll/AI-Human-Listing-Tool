@@ -1,0 +1,34 @@
+{
+  "title": "Premium Cotton T-Shirt",
+  "brand": "Acme Apparel",
+  "description": "Soft breathable 100% cotton t-shirt for everyday comfort.",
+  "bullet_points": [
+    "100% combed cotton",
+    "Machine washable",
+    "Slim fit"
+  ],
+  "price": "799",
+  "sku": "product_sku_001",
+  "category": "Men > Clothing > T-Shirts",
+  "attributes": {
+    "color": "Black",
+    "size": "M",
+    "material": "Cotton"
+  },
+  "variants": [
+    {
+      "sku": "product_sku_001_black_m",
+      "color": "Black",
+      "size": "M",
+      "price": "799",
+      "stock": 50
+    },
+    {
+      "sku": "product_sku_001_black_l",
+      "color": "Black",
+      "size": "L",
+      "price": "799",
+      "stock": 40
+    }
+  ]
+}
