@@ -13,13 +13,11 @@ import google.generativeai as genai
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3-flash-preview"
 MODEL_CANDIDATES = (
+    "gemini-3-pro-preview",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-2.0-flash-exp",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-pro-latest",
 )
 
 
@@ -31,54 +29,14 @@ class GeminiLLMEngine:
         self._active_model_name = model
         self.model = genai.GenerativeModel(model_name=model)
 
-    @staticmethod
-    def _extract_json_payload(text: str) -> str:
-        stripped = text.strip()
-        if stripped.startswith("{") or stripped.startswith("["):
-            return stripped
-
-        fenced = re.search(r"```(?:json)?\s*(\{.*\}|\[.*\])\s*```", stripped, flags=re.DOTALL)
-        if fenced:
-            return fenced.group(1).strip()
-
-        start = min((idx for idx in [stripped.find("{"), stripped.find("[")] if idx != -1), default=-1)
-        if start == -1:
-            return stripped
-
-        candidate = stripped[start:]
-        end_obj = candidate.rfind("}")
-        end_arr = candidate.rfind("]")
-        end = max(end_obj, end_arr)
-        return candidate[: end + 1] if end != -1 else candidate
-
-    def _discover_supported_models(self) -> list[str]:
-        try:
-            names = [
-                model.name.split("/")[-1]
-                for model in genai.list_models()
-                if "generateContent" in getattr(model, "supported_generation_methods", [])
-            ]
-            return list(dict.fromkeys(names))
-        except Exception as error:
-            LOGGER.warning("Could not list Gemini models: %s", error)
-            return []
-
-    def _try_switch_to_supported_model(self) -> bool:
-        available = self._discover_supported_models()
-        ordered = [
-            candidate for candidate in MODEL_CANDIDATES if candidate in available and candidate != self._active_model_name
-        ]
-        ordered.extend([name for name in available if name not in ordered and name != self._active_model_name])
-
-        for candidate in ordered:
-            try:
+    def _try_switch_to_supported_model(self) -> None:
+        available = {m.name.split("/")[-1] for m in genai.list_models() if "generateContent" in m.supported_generation_methods}
+        for candidate in MODEL_CANDIDATES:
+            if candidate in available:
                 self._active_model_name = candidate
                 self.model = genai.GenerativeModel(model_name=candidate)
                 LOGGER.info("Switched Gemini model to supported candidate: %s", candidate)
-                return True
-            except Exception:
-                continue
-        return False
+                return
 
     def _generate(self, contents: Any) -> str:
         try:
@@ -86,16 +44,13 @@ class GeminiLLMEngine:
             return (response.text or "").strip()
         except Exception as error:
             LOGGER.warning("Primary Gemini request failed for model '%s': %s", self._active_model_name, error)
-
-        if not self._try_switch_to_supported_model():
-            raise RuntimeError("LLM request failed and no fallback model could be selected.")
-
-        try:
-            response = self.model.generate_content(contents)
-            return (response.text or "").strip()
-        except Exception as retry_error:
-            LOGGER.warning("Gemini retry with fallback model '%s' failed: %s", self._active_model_name, retry_error)
-            raise RuntimeError("LLM request failed") from retry_error
+            try:
+                self._try_switch_to_supported_model()
+                response = self.model.generate_content(contents)
+                return (response.text or "").strip()
+            except Exception as retry_error:
+                LOGGER.warning("Gemini retry with discovered model failed: %s", retry_error)
+                raise RuntimeError("LLM request failed") from retry_error
 
     def analyze_screen_with_llm(self, screenshot_path: Path, instruction: str) -> dict[str, Any]:
         if not screenshot_path.exists():
@@ -122,8 +77,13 @@ Output JSON schema:
 }}
 """
         try:
-            text = self._generate([prompt, {"mime_type": "image/png", "data": screenshot_path.read_bytes()}])
-            return json.loads(self._extract_json_payload(text))
+            text = self._generate(
+                [
+                    prompt,
+                    {"mime_type": "image/png", "data": screenshot_path.read_bytes()},
+                ]
+            )
+            return json.loads(text)
         except json.JSONDecodeError:
             LOGGER.warning("LLM returned non-JSON response. Falling back to safe wait.")
         except Exception as error:
@@ -158,10 +118,7 @@ Return strict JSON:
 """
         try:
             text = self._generate(prompt)
-            parsed = json.loads(self._extract_json_payload(text))
-            if not isinstance(parsed, dict):
-                raise ValueError("Workflow response was not an object.")
-            return parsed
+            return json.loads(text)
         except Exception as error:
             LOGGER.warning("Command interpretation via LLM failed, using local fallback parser: %s", error)
             return self._fallback_command_parse(command)
@@ -173,16 +130,13 @@ Return strict JSON:
         operation = "edit_listing"
         if "new" in lowered and "list" in lowered:
             operation = "new_listing"
-        elif "bulk" in lowered or "all " in lowered or " all" in lowered:
+        elif "bulk" in lowered:
             operation = "bulk_update"
 
         sku_match = re.search(r"\bsku\s*[:#-]?\s*([A-Za-z0-9_-]+)\b", normalized, flags=re.IGNORECASE)
         sku = sku_match.group(1) if sku_match else ""
 
         updates: dict[str, Any] = {}
-        filters: dict[str, str] = {}
-
-        quoted_chunks = re.findall(r'"([^"]+)"', normalized)
 
         name_match = re.search(
             r"(?:update|change)\s+(?:the\s+)?(?:name|title).+?\bto\b\s+(.+)$",
@@ -192,25 +146,14 @@ Return strict JSON:
         if name_match:
             updates["title"] = name_match.group(1).strip().strip('"').strip("'")
 
-        price_match = re.search(r"\b(?:price|prices?)\b.*?\bto\b\s*(\d+(?:\.\d+)?)", lowered)
-        if price_match:
-            value = price_match.group(1)
-            updates["price"] = float(value) if "." in value else int(value)
-
-        category_match = re.search(r"\b(?:of|for|in)\s+([a-zA-Z][a-zA-Z\s]+?)(?:\s+from\s+the\s+file|\s+to\s+|$)", lowered)
-        if category_match and any(token in lowered for token in {"price", "prices", "change", "update"}):
-            filters["category"] = category_match.group(1).strip()
-
+        quoted_chunks = re.findall(r'"([^"]+)"', normalized)
         if len(quoted_chunks) >= 2 and "title" in updates:
-            filters["title"] = quoted_chunks[0]
+            updates["target_title"] = quoted_chunks[0]
             updates["title"] = quoted_chunks[-1]
-        elif len(quoted_chunks) == 1 and "title" not in updates:
-            filters["title"] = quoted_chunks[0]
 
         return {
             "operation": operation,
             "updates": updates,
             "sku": sku,
-            "filters": filters,
             "notes": "Fallback parser used because LLM response was unavailable or invalid.",
         }

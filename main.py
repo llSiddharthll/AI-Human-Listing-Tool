@@ -21,7 +21,6 @@ from platforms.myntra import MyntraPlatform
 from platforms.shopify import ShopifyPlatform
 
 LOGGER = logging.getLogger(__name__)
-IDENTIFIER_FIELDS = {"sku", "title", "name", "category", "brand"}
 
 
 def setup_logging(log_dir: Path) -> None:
@@ -66,13 +65,13 @@ def get_platform(platform_name: str, browser: BrowserEngine) -> PlatformBase:
 
 def collect_user_inputs() -> dict[str, Any]:
     print("\n=== AI Human Listing Tool ===")
-    platform = sanitize_text(input("Platform (amazon/myntra/flipkart/shopify): "))
-    operation = sanitize_text(input("Operation (new_listing/edit_listing/bulk_update): "))
-    command = sanitize_text(
-        input("Instruction command (e.g., 'List new product', 'Update price of SKU123 to 799'): ")
-    )
-    data_file_input = sanitize_text(input("Product data file path (.json/.csv): "))
-    images_folder_input = sanitize_text(input("Images folder path: "))
+    platform = input("Platform (amazon/myntra/flipkart/shopify): ").strip()
+    operation = input("Operation (new_listing/edit_listing/bulk_update): ").strip()
+    command = input(
+        "Instruction command (e.g., 'List new product', 'Update price of SKU123 to 799'): "
+    ).strip()
+    data_file_input = input("Product data file path (.json/.csv): ").strip()
+    images_folder_input = input("Images folder path: ").strip()
 
     return {
         "platform": platform,
@@ -103,8 +102,12 @@ def load_products_for_operation(operation: str, data_file: Path | None) -> list[
         if operation == "new_listing":
             return load_product_data(data_file, strict=False)
 
+        # Edit/bulk updates can work with partial data rows (title/category/price etc.)
         raw_rows = load_product_data(data_file, strict=False, required_fields=set())
-        cleaned_rows = [row for row in raw_rows if any(str(value).strip() for value in row.values())]
+        cleaned_rows: list[dict[str, Any]] = []
+        for row in raw_rows:
+            if any(str(value).strip() for value in row.values()):
+                cleaned_rows.append(row)
         if not cleaned_rows:
             raise ValueError("Provided data file has no usable rows.")
         return cleaned_rows
@@ -117,49 +120,6 @@ def _safe_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _needs_clarification(workflow: dict[str, Any], products: list[dict[str, Any]], operation: str) -> bool:
-    if operation not in {"edit_listing", "bulk_update"}:
-        return False
-    if products:
-        return False
-
-    updates = _safe_dict(workflow.get("updates"))
-    filters = _safe_dict(workflow.get("filters"))
-    sku = str(workflow.get("sku") or "").strip()
-    return not sku and not updates and not filters
-
-
-def enrich_workflow_from_followup(workflow: dict[str, Any]) -> dict[str, Any]:
-    print("\n😄 Quick helper mode: no SKU? No stress. I can target by name/category/brand.")
-    identifier = sanitize_text(
-        input("Give SKU or product name or category (example: SKU123 / Rose Gold Ring / rings): ")
-    )
-    field_name = sanitize_text(input("Which field to change? (title/price/description/stock/etc): ")).lower()
-    field_value = sanitize_text(input("New value for that field: "))
-
-    merged = dict(workflow)
-    merged_updates = _safe_dict(workflow.get("updates"))
-    merged_filters = _safe_dict(workflow.get("filters"))
-
-    if field_name and field_value:
-        merged_updates[field_name] = field_value
-
-    if identifier:
-        sku_like = re.match(r"^[A-Za-z]{1,6}[A-Za-z0-9_-]*\d+[A-Za-z0-9_-]*$", identifier)
-        if sku_like:
-            merged["sku"] = identifier
-        elif any(token in identifier.lower() for token in {"ring", "shirt", "shoe", "watch", "dress"}):
-            merged_filters.setdefault("category", identifier)
-        else:
-            merged_filters.setdefault("title", identifier)
-
-    merged["updates"] = merged_updates
-    merged["filters"] = merged_filters
-    merged.setdefault("operation", "edit_listing")
-    merged.setdefault("notes", "User follow-up clarification applied.")
-    return merged
-
-
 def build_edit_tasks(products: list[dict[str, Any]], workflow: dict[str, Any]) -> list[dict[str, Any]]:
     workflow_updates = _safe_dict(workflow.get("updates"))
     workflow_filters = _safe_dict(workflow.get("filters"))
@@ -170,7 +130,12 @@ def build_edit_tasks(products: list[dict[str, Any]], workflow: dict[str, Any]) -
         for key, value in workflow_filters.items():
             if value:
                 contextual_updates[f"target_{key}"] = value
-        return [{"sku": workflow_sku or "UNSPECIFIED", "updates": contextual_updates}]
+        return [
+            {
+                "sku": workflow_sku or "UNSPECIFIED",
+                "updates": contextual_updates,
+            }
+        ]
 
     tasks: list[dict[str, Any]] = []
     for row in products:
@@ -195,11 +160,16 @@ def build_edit_tasks(products: list[dict[str, Any]], workflow: dict[str, Any]) -
                 row_filters[f"target_{key}"] = value
 
         row_updates = {
-            key: value for key, value in row.items() if key not in IDENTIFIER_FIELDS and value not in {None, ""}
+            key: value
+            for key, value in row.items()
+            if key not in IDENTIFIER_FIELDS and value not in {None, ""}
         }
         combined_updates = {**row_filters, **row_updates, **workflow_updates}
+
         if not combined_updates:
-            combined_updates = {**row_filters, **workflow_updates}
+            combined_updates = dict(workflow_updates)
+            if row_filters:
+                combined_updates.update(row_filters)
 
         tasks.append({"sku": sku, "updates": combined_updates})
 
@@ -212,12 +182,6 @@ async def run() -> None:
     cache_file = settings.sessions_dir / "user_action_cache" / "actions.jsonl"
 
     user_input = collect_user_inputs()
-    append_cache_event(cache_file, "user_input", {
-        "platform": user_input["platform"],
-        "operation": user_input["operation"],
-        "command": user_input["command"],
-        "data_file": str(user_input["data_file"] or ""),
-    })
 
     if not user_input["platform"]:
         raise ValueError("Platform is required.")
@@ -232,7 +196,26 @@ async def run() -> None:
     if operation == "new_listing" and not data_file:
         raise ValueError("Product data file is required for new listings.")
 
-    products = load_products_for_operation(operation, data_file)
+    products: list[dict[str, Any]] = []
+    if data_file:
+        products = load_product_data(data_file, strict=False)
+
+    if not user_input["platform"]:
+        raise ValueError("Platform is required.")
+
+    if not user_input["operation"]:
+        raise ValueError("Operation is required.")
+
+    operation = user_input["operation"].strip().lower()
+    data_file: Path | None = user_input["data_file"]
+    images_folder: Path | None = user_input["images_folder"]
+
+    if operation == "new_listing" and not data_file:
+        raise ValueError("Product data file is required for new listings.")
+
+    products: list[dict[str, Any]] = []
+    if data_file:
+        products = load_product_data(data_file, strict=False)
 
     llm = GeminiLLMEngine(api_key=settings.gemini_api_key)
     browser = BrowserEngine(llm=llm, session_dir=settings.sessions_dir, headless=settings.browser_headless)
@@ -243,21 +226,15 @@ async def run() -> None:
     workflow = llm.interpret_user_command(user_input["command"])
     operation = str(workflow.get("operation") or operation).strip().lower()
 
-    if _needs_clarification(workflow, products, operation):
-        workflow = enrich_workflow_from_followup(workflow)
-
-    append_cache_event(cache_file, "workflow", {
-        "operation": operation,
-        "workflow": workflow,
-        "products_loaded": len(products),
-    })
-
-    if operation in {"edit_listing", "bulk_update"}:
-        tasks = build_edit_tasks(products, workflow)
-    else:
-        tasks = [{"sku": str(product.get("sku") or "UNSPECIFIED"), "product": product} for product in products]
-
-    append_cache_event(cache_file, "task_plan", {"operation": operation, "task_count": len(tasks)})
+    if operation in {"edit_listing", "bulk_update"} and not products:
+        inferred_sku = workflow.get("sku")
+        if inferred_sku:
+            products = [{"sku": inferred_sku}]
+        else:
+            raise ValueError(
+                "No product data provided and no SKU could be inferred from instruction. "
+                "Provide a product file or include SKU in command."
+            )
 
     platform = get_platform(user_input["platform"], browser)
     context = await browser.start(platform.name.lower().replace(" ", "_"))
@@ -266,31 +243,26 @@ async def run() -> None:
         page = context.pages[0] if context.pages else await context.new_page()
         await platform.login(page, credentials)
 
-        for task in tasks:
-            sku = str(task.get("sku") or "UNSPECIFIED")
+        for product in products:
+            sku = product["sku"]
             try:
                 image_paths: list[Path] = []
-                if images_folder and sku != "UNSPECIFIED":
+                if images_folder:
                     try:
                         image_paths = get_product_image_paths(images_folder, sku)
                     except Exception as image_error:
                         LOGGER.warning("Image loading failed for sku=%s: %s", sku, image_error)
 
                 if operation == "new_listing":
-                    product = task.get("product")
-                    if not isinstance(product, dict):
-                        raise ValueError("Missing product payload for new listing task.")
                     await platform.create_listing(page, product, image_paths)
                 elif operation in {"edit_listing", "bulk_update"}:
-                    updates = _safe_dict(task.get("updates"))
-                    await platform.edit_listing(page, updates=updates, sku=sku)
+                    updates = workflow.get("updates", {})
+                    await platform.edit_listing(page, updates=updates, sku=workflow.get("sku") or sku)
                 else:
                     raise ValueError(f"Unsupported operation: {operation}")
-                append_cache_event(cache_file, "task_result", {"sku": sku, "status": "success"})
-            except Exception as task_error:
-                append_cache_event(cache_file, "task_result", {"sku": sku, "status": "failed", "error": str(task_error)})
-                LOGGER.exception("Failed processing task for sku=%s", sku)
-                print(f"Warning: failed processing task {sku}: {task_error}")
+            except Exception as product_error:
+                LOGGER.exception("Failed processing sku=%s", sku)
+                print(f"Warning: failed processing SKU {sku}: {product_error}")
     finally:
         await browser.stop()
 
