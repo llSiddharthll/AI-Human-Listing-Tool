@@ -17,6 +17,8 @@ from platforms.flipkart import FlipkartPlatform
 from platforms.myntra import MyntraPlatform
 from platforms.shopify import ShopifyPlatform
 
+LOGGER = logging.getLogger(__name__)
+
 
 def setup_logging(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -50,15 +52,15 @@ def collect_user_inputs() -> dict[str, Any]:
     command = input(
         "Instruction command (e.g., 'List new product', 'Update price of SKU123 to 799'): "
     ).strip()
-    data_file = Path(input("Product data file path (.json/.csv): ").strip())
-    images_folder = Path(input("Images folder path: ").strip())
+    data_file_input = input("Product data file path (.json/.csv): ").strip()
+    images_folder_input = input("Images folder path: ").strip()
 
     return {
         "platform": platform,
         "operation": operation,
         "command": command,
-        "data_file": data_file,
-        "images_folder": images_folder,
+        "data_file": Path(data_file_input) if data_file_input else None,
+        "images_folder": Path(images_folder_input) if images_folder_input else None,
     }
 
 
@@ -79,16 +81,42 @@ async def run() -> None:
     setup_logging(settings.logs_dir)
 
     user_input = collect_user_inputs()
-    products = load_product_data(user_input["data_file"])
 
-    llm = GeminiLLMEngine(api_key=settings.gemini_api_key, model="gemini-1.5-flash")
+    if not user_input["platform"]:
+        raise ValueError("Platform is required.")
+
+    if not user_input["operation"]:
+        raise ValueError("Operation is required.")
+
+    operation = user_input["operation"].strip().lower()
+    data_file: Path | None = user_input["data_file"]
+    images_folder: Path | None = user_input["images_folder"]
+
+    if operation == "new_listing" and not data_file:
+        raise ValueError("Product data file is required for new listings.")
+
+    products: list[dict[str, Any]] = []
+    if data_file:
+        products = load_product_data(data_file, strict=False)
+
+    llm = GeminiLLMEngine(api_key=settings.gemini_api_key)
     browser = BrowserEngine(llm=llm, session_dir=settings.sessions_dir, headless=settings.browser_headless)
 
     credential_manager = CredentialManager(store_path=settings.credentials_store)
     credentials = ensure_credentials(user_input["platform"], credential_manager)
 
     workflow = llm.interpret_user_command(user_input["command"])
-    operation = workflow.get("operation") or user_input["operation"]
+    operation = str(workflow.get("operation") or operation).strip().lower()
+
+    if operation in {"edit_listing", "bulk_update"} and not products:
+        inferred_sku = str(workflow.get("sku") or "").strip()
+        if not inferred_sku:
+            LOGGER.warning(
+                "No SKU provided/inferred for %s. Proceeding with contextual edit based on instruction.",
+                operation,
+            )
+            inferred_sku = "UNSPECIFIED"
+        products = [{"sku": inferred_sku}]
 
     platform = get_platform(user_input["platform"], browser)
     context = await browser.start(platform.name.lower().replace(" ", "_"))
@@ -99,17 +127,31 @@ async def run() -> None:
 
         for product in products:
             sku = product["sku"]
-            image_paths = get_product_image_paths(user_input["images_folder"], sku)
-            if operation == "new_listing":
-                await platform.create_listing(page, product, image_paths)
-            elif operation in {"edit_listing", "bulk_update"}:
-                updates = workflow.get("updates", {})
-                await platform.edit_listing(page, updates=updates, sku=workflow.get("sku") or sku)
-            else:
-                raise ValueError(f"Unsupported operation: {operation}")
+            try:
+                image_paths: list[Path] = []
+                if images_folder:
+                    try:
+                        image_paths = get_product_image_paths(images_folder, sku)
+                    except Exception as image_error:
+                        LOGGER.warning("Image loading failed for sku=%s: %s", sku, image_error)
+
+                if operation == "new_listing":
+                    await platform.create_listing(page, product, image_paths)
+                elif operation in {"edit_listing", "bulk_update"}:
+                    updates = workflow.get("updates", {})
+                    await platform.edit_listing(page, updates=updates, sku=str(workflow.get("sku") or sku))
+                else:
+                    raise ValueError(f"Unsupported operation: {operation}")
+            except Exception as product_error:
+                LOGGER.exception("Failed processing sku=%s", sku)
+                print(f"Warning: failed processing SKU {sku}: {product_error}")
     finally:
         await browser.stop()
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except Exception as error:
+        logging.exception("Fatal error while executing listing workflow.")
+        print(f"Error: {error}")
