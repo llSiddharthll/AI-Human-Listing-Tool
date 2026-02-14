@@ -76,6 +76,88 @@ def ensure_credentials(platform: str, manager: CredentialManager) -> dict[str, s
         return credentials
 
 
+def load_products_for_operation(operation: str, data_file: Path | None) -> list[dict[str, Any]]:
+    if not data_file:
+        return []
+
+    try:
+        if operation == "new_listing":
+            return load_product_data(data_file, strict=False)
+
+        # Edit/bulk updates can work with partial data rows (title/category/price etc.)
+        raw_rows = load_product_data(data_file, strict=False, required_fields=set())
+        cleaned_rows: list[dict[str, Any]] = []
+        for row in raw_rows:
+            if any(str(value).strip() for value in row.values()):
+                cleaned_rows.append(row)
+        if not cleaned_rows:
+            raise ValueError("Provided data file has no usable rows.")
+        return cleaned_rows
+    except Exception as error:
+        LOGGER.warning("Could not load product data from '%s': %s", data_file, error)
+        return []
+
+
+def _safe_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def build_edit_tasks(products: list[dict[str, Any]], workflow: dict[str, Any]) -> list[dict[str, Any]]:
+    workflow_updates = _safe_dict(workflow.get("updates"))
+    workflow_filters = _safe_dict(workflow.get("filters"))
+    workflow_sku = str(workflow.get("sku") or "").strip()
+
+    if not products:
+        contextual_updates = dict(workflow_updates)
+        for key, value in workflow_filters.items():
+            if value:
+                contextual_updates[f"target_{key}"] = value
+        return [
+            {
+                "sku": workflow_sku or "UNSPECIFIED",
+                "updates": contextual_updates,
+            }
+        ]
+
+    tasks: list[dict[str, Any]] = []
+    for row in products:
+        if not isinstance(row, dict):
+            continue
+
+        sku = str(row.get("sku") or workflow_sku or "").strip() or "UNSPECIFIED"
+        row_filters: dict[str, Any] = {}
+
+        if row.get("title"):
+            row_filters["target_title"] = str(row["title"])
+        elif row.get("name"):
+            row_filters["target_title"] = str(row["name"])
+
+        if row.get("category"):
+            row_filters["target_category"] = str(row["category"])
+        if row.get("brand"):
+            row_filters["target_brand"] = str(row["brand"])
+
+        for key, value in workflow_filters.items():
+            if value and f"target_{key}" not in row_filters:
+                row_filters[f"target_{key}"] = value
+
+        row_updates = {
+            key: value
+            for key, value in row.items()
+            if key not in IDENTIFIER_FIELDS and value not in {None, ""}
+        }
+        combined_updates = {**row_filters, **row_updates, **workflow_updates}
+
+        if not combined_updates:
+            combined_updates = dict(workflow_updates)
+            if row_filters:
+                combined_updates.update(row_filters)
+
+        tasks.append({"sku": sku, "updates": combined_updates})
+
+    return tasks or [{"sku": workflow_sku or "UNSPECIFIED", "updates": workflow_updates}]
+
+
 async def run() -> None:
     settings = Settings.from_env()
     setup_logging(settings.logs_dir)

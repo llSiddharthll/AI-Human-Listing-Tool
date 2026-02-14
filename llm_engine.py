@@ -13,11 +13,11 @@ import google.generativeai as genai
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-1.5-flash-latest"
+DEFAULT_MODEL = "gemini-3-flash-preview"
 MODEL_CANDIDATES = (
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro-latest",
+    "gemini-3-pro-preview",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
 )
 
 
@@ -118,6 +118,7 @@ Return strict JSON:
   "operation": "new_listing|edit_listing|bulk_update",
   "updates": {{"field": "value"}},
   "sku": "optional",
+  "filters": {{"title": "optional", "category": "optional", "brand": "optional"}},
   "notes": "short text"
 }}
 """
