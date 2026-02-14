@@ -99,7 +99,24 @@ async def run() -> None:
     if data_file:
         products = load_product_data(data_file, strict=False)
 
-    llm = GeminiLLMEngine(api_key=settings.gemini_api_key, model="gemini-1.5-flash")
+    if not user_input["platform"]:
+        raise ValueError("Platform is required.")
+
+    if not user_input["operation"]:
+        raise ValueError("Operation is required.")
+
+    operation = user_input["operation"].strip().lower()
+    data_file: Path | None = user_input["data_file"]
+    images_folder: Path | None = user_input["images_folder"]
+
+    if operation == "new_listing" and not data_file:
+        raise ValueError("Product data file is required for new listings.")
+
+    products: list[dict[str, Any]] = []
+    if data_file:
+        products = load_product_data(data_file, strict=False)
+
+    llm = GeminiLLMEngine(api_key=settings.gemini_api_key)
     browser = BrowserEngine(llm=llm, session_dir=settings.sessions_dir, headless=settings.browser_headless)
 
     credential_manager = CredentialManager(store_path=settings.credentials_store)
