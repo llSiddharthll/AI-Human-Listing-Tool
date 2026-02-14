@@ -18,7 +18,6 @@ from platforms.myntra import MyntraPlatform
 from platforms.shopify import ShopifyPlatform
 
 LOGGER = logging.getLogger(__name__)
-IDENTIFIER_FIELDS = {"sku", "title", "name", "category", "brand"}
 
 
 def setup_logging(log_dir: Path) -> None:
@@ -178,7 +177,26 @@ async def run() -> None:
     if operation == "new_listing" and not data_file:
         raise ValueError("Product data file is required for new listings.")
 
-    products = load_products_for_operation(operation, data_file)
+    products: list[dict[str, Any]] = []
+    if data_file:
+        products = load_product_data(data_file, strict=False)
+
+    if not user_input["platform"]:
+        raise ValueError("Platform is required.")
+
+    if not user_input["operation"]:
+        raise ValueError("Operation is required.")
+
+    operation = user_input["operation"].strip().lower()
+    data_file: Path | None = user_input["data_file"]
+    images_folder: Path | None = user_input["images_folder"]
+
+    if operation == "new_listing" and not data_file:
+        raise ValueError("Product data file is required for new listings.")
+
+    products: list[dict[str, Any]] = []
+    if data_file:
+        products = load_product_data(data_file, strict=False)
 
     llm = GeminiLLMEngine(api_key=settings.gemini_api_key)
     browser = BrowserEngine(llm=llm, session_dir=settings.sessions_dir, headless=settings.browser_headless)
@@ -189,10 +207,15 @@ async def run() -> None:
     workflow = llm.interpret_user_command(user_input["command"])
     operation = str(workflow.get("operation") or operation).strip().lower()
 
-    if operation in {"edit_listing", "bulk_update"}:
-        tasks = build_edit_tasks(products, workflow)
-    else:
-        tasks = [{"sku": str(product.get("sku") or "UNSPECIFIED"), "product": product} for product in products]
+    if operation in {"edit_listing", "bulk_update"} and not products:
+        inferred_sku = workflow.get("sku")
+        if inferred_sku:
+            products = [{"sku": inferred_sku}]
+        else:
+            raise ValueError(
+                "No product data provided and no SKU could be inferred from instruction. "
+                "Provide a product file or include SKU in command."
+            )
 
     platform = get_platform(user_input["platform"], browser)
     context = await browser.start(platform.name.lower().replace(" ", "_"))
@@ -201,29 +224,26 @@ async def run() -> None:
         page = context.pages[0] if context.pages else await context.new_page()
         await platform.login(page, credentials)
 
-        for task in tasks:
-            sku = str(task.get("sku") or "UNSPECIFIED")
+        for product in products:
+            sku = product["sku"]
             try:
                 image_paths: list[Path] = []
-                if images_folder and sku != "UNSPECIFIED":
+                if images_folder:
                     try:
                         image_paths = get_product_image_paths(images_folder, sku)
                     except Exception as image_error:
                         LOGGER.warning("Image loading failed for sku=%s: %s", sku, image_error)
 
                 if operation == "new_listing":
-                    product = task.get("product")
-                    if not isinstance(product, dict):
-                        raise ValueError("Missing product payload for new listing task.")
                     await platform.create_listing(page, product, image_paths)
                 elif operation in {"edit_listing", "bulk_update"}:
-                    updates = _safe_dict(task.get("updates"))
-                    await platform.edit_listing(page, updates=updates, sku=sku)
+                    updates = workflow.get("updates", {})
+                    await platform.edit_listing(page, updates=updates, sku=workflow.get("sku") or sku)
                 else:
                     raise ValueError(f"Unsupported operation: {operation}")
-            except Exception as task_error:
-                LOGGER.exception("Failed processing task for sku=%s", sku)
-                print(f"Warning: failed processing task {sku}: {task_error}")
+            except Exception as product_error:
+                LOGGER.exception("Failed processing sku=%s", sku)
+                print(f"Warning: failed processing SKU {sku}: {product_error}")
     finally:
         await browser.stop()
 

@@ -9,9 +9,7 @@ MANDATORY_FIELDS = {"title", "brand", "description", "price", "sku", "category"}
 SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
-def load_product_data(
-    file_path: Path, *, strict: bool = True, required_fields: set[str] | None = None
-) -> list[dict[str, Any]]:
+def load_product_data(file_path: Path, *, strict: bool = True) -> list[dict[str, Any]]:
     if not file_path.exists():
         raise FileNotFoundError(f"Product data file does not exist: {file_path}")
 
@@ -29,13 +27,12 @@ def load_product_data(
 
     valid_products: list[dict[str, Any]] = []
     validation_errors: list[str] = []
-    fields_to_require = MANDATORY_FIELDS if required_fields is None else required_fields
     for index, product in enumerate(products, start=1):
         if not isinstance(product, dict):
             validation_errors.append(f"Row {index}: product entry is not a JSON object/CSV row.")
             continue
 
-        missing = fields_to_require.difference(product.keys())
+        missing = MANDATORY_FIELDS.difference(product.keys())
         if missing:
             validation_errors.append(f"Row {index}: missing mandatory fields {sorted(missing)}")
             continue
