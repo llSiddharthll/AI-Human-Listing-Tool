@@ -29,9 +29,12 @@ class LLMDrivenPlatform(PlatformBase):
         await self.save_listing(page)
 
     async def edit_listing(self, page: Page, updates: dict[str, Any], sku: str) -> None:
+        listing_reference = (
+            f"SKU {sku}" if sku and sku != "UNSPECIFIED" else "the listing identified by the provided command context"
+        )
         instruction = (
-            f"Find listing SKU {sku} on {self.name} and apply updates: {updates}. "
-            "Handle popups, layout changes, and validations." 
+            f"Find {listing_reference} on {self.name} and apply updates: {updates}. "
+            "Handle popups, layout changes, and validations."
         )
         await self.browser.execute_llm_actions(page, instruction)
         await self.save_listing(page)
