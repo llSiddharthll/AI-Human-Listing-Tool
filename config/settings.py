@@ -15,7 +15,6 @@ class Settings:
     """Application configuration loaded from environment variables."""
 
     gemini_api_key: str
-    gemini_model: str
     browser_headless: bool
     sessions_dir: Path
     logs_dir: Path
@@ -29,7 +28,6 @@ class Settings:
 
         return cls(
             gemini_api_key=api_key,
-            gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
             browser_headless=os.getenv("BROWSER_HEADLESS", "false").lower() == "true",
             sessions_dir=Path(os.getenv("SESSIONS_DIR", "sessions")),
             logs_dir=Path(os.getenv("LOGS_DIR", "logs")),

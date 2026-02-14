@@ -11,18 +11,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 class GeminiLLMEngine:
-    """Gemini Flash wrapper for visual UI interpretation and instruction planning."""
+    """Gemini 3.5 Flash wrapper for visual UI interpretation and instruction planning."""
 
-    def __init__(self, api_key: str, model: str = "gemini-3.5-flash") -> None:
+    def __init__(self, api_key: str, model: str = "gemini-1.5-flash") -> None:
         genai.configure(api_key=api_key)
-        self.model_name = model
         self.model = genai.GenerativeModel(model_name=model)
-
-    def _parse_json_text(self, text: str) -> dict[str, Any]:
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        return json.loads(cleaned)
 
     def analyze_screen_with_llm(self, screenshot_path: Path, instruction: str) -> dict[str, Any]:
         """Analyze current UI screenshot and return structured action JSON."""
@@ -61,8 +54,9 @@ Rules:
             ]
         )
 
+        text = response.text.strip()
         try:
-            return self._parse_json_text(response.text)
+            return json.loads(text)
         except json.JSONDecodeError:
             LOGGER.warning("LLM returned non-JSON response. Falling back to safe wait.")
             return {
@@ -92,11 +86,9 @@ Return strict JSON:
 }}
 """
         response = self.model.generate_content(prompt)
+        text = response.text.strip()
         try:
-            parsed = self._parse_json_text(response.text)
-            if not isinstance(parsed, dict):
-                raise json.JSONDecodeError("Not object", response.text, 0)
-            return parsed
+            return json.loads(text)
         except json.JSONDecodeError:
             return {
                 "operation": "edit_listing",

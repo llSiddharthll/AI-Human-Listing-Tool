@@ -51,25 +51,28 @@ Production-grade, LLM-driven multi-platform product listing automation using **P
 
 ## Installation
 
+1. Create virtual environment and install dependencies:
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python -m playwright install chromium
+```
+
+2. Configure environment:
+
+```bash
 cp .env.example .env
 ```
 
-Generate encryption key:
+3. Generate credential encryption key:
 
 ```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Set `.env` values:
-
-- `GEMINI_API_KEY`
-- `GEMINI_MODEL` (default: `gemini-3.5-flash`)
-- `CREDENTIAL_ENCRYPTION_KEY`
+Paste generated key into `.env` as `CREDENTIAL_ENCRYPTION_KEY`.
 
 ## Input Data Requirements
 
@@ -106,19 +109,13 @@ The helper `store_images_with_proper_naming(product_id, source_paths)` can norma
 python main.py
 ```
 
-CLI prompts:
+CLI will ask for:
 
 - Platform (`amazon`, `myntra`, `flipkart`, `shopify`)
 - Operation (`new_listing`, `edit_listing`, `bulk_update`)
-- Natural-language command
+- Natural-language command instruction
 - Product data file path
 - Images folder path
-
-### Important behavior
-
-- `new_listing`: requires product file and image folder.
-- `bulk_update`: requires product file.
-- `edit_listing`: product file and images are optional (you can drive purely from instruction text + SKU).
 
 ### Example command instructions
 
@@ -126,6 +123,33 @@ CLI prompts:
 - `Update price of SKU123 to 799`
 - `Change stock to 50`
 - `Edit description of product XYZ`
+
+## Gemini Integration Example
+
+`GeminiLLMEngine.analyze_screen_with_llm(...)` receives:
+
+- Full-page screenshot
+- Action instruction prompt
+
+And returns structured JSON actions, for example:
+
+```json
+{
+  "actions": [
+    {
+      "action": "type",
+      "target": "Product Title field",
+      "value": "Premium Cotton T-Shirt",
+      "confidence": 0.94,
+      "reason": "Title field is visible and empty"
+    }
+  ],
+  "screen_state": "Create listing form",
+  "risk": "none"
+}
+```
+
+The browser engine executes this plan adaptively and loops until a `done` action is returned.
 
 ## Session Persistence and 2FA
 
@@ -135,11 +159,11 @@ CLI prompts:
 
 ## Security
 
-- API keys are loaded from environment.
+- API keys are loaded from environment (`GEMINI_API_KEY`).
 - Credentials are encrypted at rest in `config/credentials.enc`.
-- Session data and cookies are not printed to logs.
+- Session data and cookies are never printed to logs.
 
 ## Notes
 
-- LLM output is parsed as strict JSON; markdown code fences are handled.
-- The automation loop is adaptive and intended to tolerate moderate UI changes better than static scripts.
+- This tool is LLM-driven, so workflows adapt to UI changes better than static XPath scripts.
+- You should review marketplace policies and legal constraints before automating production seller accounts.

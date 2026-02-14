@@ -9,31 +9,15 @@ MANDATORY_FIELDS = {"title", "brand", "description", "price", "sku", "category"}
 SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
-def load_product_data(file_path: Path | None, allow_empty: bool = False) -> list[dict[str, Any]]:
-    """Load products from JSON/CSV.
+def load_product_data(file_path: Path) -> list[dict[str, Any]]:
+    if not file_path.exists():
+        raise FileNotFoundError(f"Product data file does not exist: {file_path}")
 
-    If ``allow_empty`` is True and ``file_path`` is missing/empty, return an empty list.
-    """
-    if file_path is None:
-        if allow_empty:
-            return []
-        raise ValueError("Product data file path is required for this operation.")
-
-    raw_path = str(file_path).strip()
-    if not raw_path:
-        if allow_empty:
-            return []
-        raise ValueError("Product data file path is required for this operation.")
-
-    normalized = Path(raw_path)
-    if not normalized.exists():
-        raise FileNotFoundError(f"Product data file does not exist: {normalized}")
-
-    if normalized.suffix.lower() == ".json":
-        data = json.loads(normalized.read_text(encoding="utf-8"))
+    if file_path.suffix.lower() == ".json":
+        data = json.loads(file_path.read_text())
         products = data if isinstance(data, list) else [data]
-    elif normalized.suffix.lower() == ".csv":
-        with normalized.open("r", newline="", encoding="utf-8") as handle:
+    elif file_path.suffix.lower() == ".csv":
+        with file_path.open("r", newline="", encoding="utf-8") as handle:
             products = list(csv.DictReader(handle))
     else:
         raise ValueError("Only JSON or CSV product data files are supported.")
@@ -45,17 +29,10 @@ def load_product_data(file_path: Path | None, allow_empty: bool = False) -> list
     return products
 
 
-def get_product_image_paths(images_root: Path | None, sku: str, required: bool = True) -> list[Path]:
-    if images_root is None or not str(images_root).strip():
-        if required:
-            raise ValueError("Images folder path is required for this operation.")
-        return []
-
+def get_product_image_paths(images_root: Path, sku: str) -> list[Path]:
     product_folder = images_root / sku
     if not product_folder.exists():
-        if required:
-            raise FileNotFoundError(f"Image folder not found for SKU {sku}: {product_folder}")
-        return []
+        raise FileNotFoundError(f"Image folder not found for SKU {sku}: {product_folder}")
 
     image_paths = sorted(
         [
@@ -64,7 +41,7 @@ def get_product_image_paths(images_root: Path | None, sku: str, required: bool =
             if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
         ]
     )
-    if not image_paths and required:
+    if not image_paths:
         raise ValueError(f"No valid images found for SKU {sku} in {product_folder}")
 
     return image_paths
