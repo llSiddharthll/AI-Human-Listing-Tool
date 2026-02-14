@@ -9,9 +9,14 @@ MANDATORY_FIELDS = {"title", "brand", "description", "price", "sku", "category"}
 SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
-def load_product_data(file_path: Path) -> list[dict[str, Any]]:
+def load_product_data(
+    file_path: Path, *, strict: bool = True, required_fields: set[str] | None = None
+) -> list[dict[str, Any]]:
     if not file_path.exists():
         raise FileNotFoundError(f"Product data file does not exist: {file_path}")
+
+    if not file_path.suffix:
+        raise ValueError("Product data file must have a .json or .csv extension.")
 
     if file_path.suffix.lower() == ".json":
         data = json.loads(file_path.read_text())
@@ -22,11 +27,29 @@ def load_product_data(file_path: Path) -> list[dict[str, Any]]:
     else:
         raise ValueError("Only JSON or CSV product data files are supported.")
 
-    for product in products:
-        missing = MANDATORY_FIELDS.difference(product.keys())
+    valid_products: list[dict[str, Any]] = []
+    validation_errors: list[str] = []
+    fields_to_require = MANDATORY_FIELDS if required_fields is None else required_fields
+    for index, product in enumerate(products, start=1):
+        if not isinstance(product, dict):
+            validation_errors.append(f"Row {index}: product entry is not a JSON object/CSV row.")
+            continue
+
+        missing = fields_to_require.difference(product.keys())
         if missing:
-            raise ValueError(f"Product {product} missing mandatory fields: {sorted(missing)}")
-    return products
+            validation_errors.append(f"Row {index}: missing mandatory fields {sorted(missing)}")
+            continue
+
+        valid_products.append(product)
+
+    if validation_errors and strict:
+        error_preview = "; ".join(validation_errors[:5])
+        raise ValueError(f"Product validation failed: {error_preview}")
+
+    if not valid_products:
+        raise ValueError("No valid products found in the provided data file.")
+
+    return valid_products
 
 
 def get_product_image_paths(images_root: Path, sku: str) -> list[Path]:
