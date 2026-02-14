@@ -99,6 +99,23 @@ async def run() -> None:
     if data_file:
         products = load_product_data(data_file, strict=False)
 
+    if not user_input["platform"]:
+        raise ValueError("Platform is required.")
+
+    if not user_input["operation"]:
+        raise ValueError("Operation is required.")
+
+    operation = user_input["operation"].strip().lower()
+    data_file: Path | None = user_input["data_file"]
+    images_folder: Path | None = user_input["images_folder"]
+
+    if operation == "new_listing" and not data_file:
+        raise ValueError("Product data file is required for new listings.")
+
+    products: list[dict[str, Any]] = []
+    if data_file:
+        products = load_product_data(data_file, strict=False)
+
     llm = GeminiLLMEngine(api_key=settings.gemini_api_key)
     browser = BrowserEngine(llm=llm, session_dir=settings.sessions_dir, headless=settings.browser_headless)
 
@@ -109,14 +126,14 @@ async def run() -> None:
     operation = str(workflow.get("operation") or operation).strip().lower()
 
     if operation in {"edit_listing", "bulk_update"} and not products:
-        inferred_sku = str(workflow.get("sku") or "").strip()
-        if not inferred_sku:
-            LOGGER.warning(
-                "No SKU provided/inferred for %s. Proceeding with contextual edit based on instruction.",
-                operation,
+        inferred_sku = workflow.get("sku")
+        if inferred_sku:
+            products = [{"sku": inferred_sku}]
+        else:
+            raise ValueError(
+                "No product data provided and no SKU could be inferred from instruction. "
+                "Provide a product file or include SKU in command."
             )
-            inferred_sku = "UNSPECIFIED"
-        products = [{"sku": inferred_sku}]
 
     platform = get_platform(user_input["platform"], browser)
     context = await browser.start(platform.name.lower().replace(" ", "_"))
@@ -139,7 +156,7 @@ async def run() -> None:
                     await platform.create_listing(page, product, image_paths)
                 elif operation in {"edit_listing", "bulk_update"}:
                     updates = workflow.get("updates", {})
-                    await platform.edit_listing(page, updates=updates, sku=str(workflow.get("sku") or sku))
+                    await platform.edit_listing(page, updates=updates, sku=workflow.get("sku") or sku)
                 else:
                     raise ValueError(f"Unsupported operation: {operation}")
             except Exception as product_error:
