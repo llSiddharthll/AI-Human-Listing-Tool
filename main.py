@@ -22,17 +22,21 @@ from platforms.shopify import ShopifyPlatform
 
 LOGGER = logging.getLogger(__name__)
 
+IDENTIFIER_FIELDS = {"sku", "title", "name", "brand", "category", "target_title", "target_sku"}
+
 
 def setup_logging(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler(log_dir / "automation.log"),
+            logging.FileHandler(log_dir / "app.log"),
             logging.StreamHandler(),
         ],
     )
+    logging.getLogger("google_genai").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def sanitize_text(value: str) -> str:
@@ -58,36 +62,72 @@ def get_platform(platform_name: str, browser: BrowserEngine) -> PlatformBase:
         "flipkart": FlipkartPlatform,
         "shopify": ShopifyPlatform,
     }
-    if normalized not in mapping:
-        raise ValueError(f"Unsupported platform '{platform_name}'. Choose from: {', '.join(mapping)}")
-    return mapping[normalized](browser)
+    if normalized in mapping:
+        return mapping[normalized](browser)
+
+    from platforms.common import LLMDrivenPlatform
+    class GenericPlatform(LLMDrivenPlatform):
+        @property
+        def name(self) -> str:
+            return platform_name.title()
+        
+        @property
+        def login_url(self) -> str:
+            return f"https://www.google.com/search?q={platform_name.replace(' ', '+')}+login"
+
+    return GenericPlatform(browser)
 
 
-def collect_user_inputs() -> dict[str, Any]:
-    print("\n=== AI Human Listing Tool ===")
-    platform = input("Platform (amazon/myntra/flipkart/shopify): ").strip()
-    operation = input("Operation (new_listing/edit_listing/bulk_update): ").strip()
-    command = input(
-        "Instruction command (e.g., 'List new product', 'Update price of SKU123 to 799'): "
-    ).strip()
-    data_file_input = input("Product data file path (.json/.csv): ").strip()
-    images_folder_input = input("Images folder path: ").strip()
+async def agentic_input_collection(llm: GeminiLLMEngine) -> dict[str, Any]:
+    print("\n=== AI Human Listing Tool (Agent Mode) ===")
+    print("How can I help you today? (e.g., 'Update price for Face Wash to 599 on Amazon')")
 
-    return {
-        "platform": platform,
-        "operation": operation,
-        "command": command,
-        "data_file": Path(data_file_input) if data_file_input else None,
-        "images_folder": Path(images_folder_input) if images_folder_input else None,
-    }
+    history: list[dict[str, str]] = []
+    
+    while True:
+        user_msg = input("\nYou: ").strip()
+        if not user_msg:
+            continue
+        
+        history.append({"role": "user", "content": user_msg})
+        
+        print("Thinking...")
+        state = await llm.analyze_conversation_state(history)
+        
+        if state.get("is_complete"):
+            print(f"\nPlan Summary:")
+            print(f" - Platform: {state.get('platform')}")
+            print(f" - Operation: {state.get('operation')}")
+            print(f" - Item: {state.get('sku') or state.get('product_name') or 'From file'}")
+            
+            confirm = input("\nDoes this look correct? (y/n): ").strip().lower()
+            if confirm == 'y':
+                return {
+                    "platform": state.get("platform"),
+                    "operation": state.get("operation"),
+                    "command": user_msg, # Using the last message as the command for interpret_user_command
+                    "data_file": Path(state.get("data_file_path")) if state.get("data_file_path") else None,
+                    "images_folder": Path(state.get("images_folder_path")) if state.get("images_folder_path") else None,
+                    "sku": state.get("sku"),
+                    "product_name": state.get("product_name")
+                }
+            else:
+                print("Okay, what should we change?")
+                history.append({"role": "assistant", "content": "The user rejected the plan. I need to clarify the details. What should we change?"})
+        else:
+            assistant_msg = state.get("suggested_next_question", "Could you tell me more about what you'd like to do?")
+            print(f"\nAI: {assistant_msg}")
+            history.append({"role": "assistant", "content": assistant_msg})
 
 
 def ensure_credentials(platform: str, manager: CredentialManager) -> dict[str, str]:
     try:
         return manager.get_credentials(platform)
     except KeyError:
-        print(f"No encrypted credentials found for {platform}. Please provide them once.")
-        username = sanitize_text(input("Username/email: "))
+        print(f"No encrypted credentials found for {platform}. You can provide them now, or leave blank if already logged in via persistent session.")
+        username = sanitize_text(input("Username/email (press Enter to skip): "))
+        if not username:
+            return {}
         password = getpass.getpass("Password (hidden): ").strip()
         credentials = {"username": username, "password": password}
         manager.save_credentials(platform, credentials)
@@ -179,64 +219,52 @@ def build_edit_tasks(products: list[dict[str, Any]], workflow: dict[str, Any]) -
 async def run() -> None:
     settings = Settings.from_env()
     setup_logging(settings.logs_dir)
-    cache_file = settings.sessions_dir / "user_action_cache" / "actions.jsonl"
+    
+    llm = GeminiLLMEngine(api_keys=settings.gemini_api_keys, model=settings.gemini_model)
+    user_input = await agentic_input_collection(llm)
 
-    user_input = collect_user_inputs()
-
-    if not user_input["platform"]:
-        raise ValueError("Platform is required.")
-
-    if not user_input["operation"]:
-        raise ValueError("Operation is required.")
-
+    platform_name = user_input["platform"]
     operation = user_input["operation"].strip().lower()
     data_file: Path | None = user_input["data_file"]
     images_folder: Path | None = user_input["images_folder"]
 
-    if operation == "new_listing" and not data_file:
-        raise ValueError("Product data file is required for new listings.")
-
     products: list[dict[str, Any]] = []
     if data_file:
         products = load_product_data(data_file, strict=False)
+    elif user_input.get("sku") or user_input.get("product_name"):
+        products = [{
+            "sku": user_input.get("sku") or "UNSPECIFIED",
+            "title": user_input.get("product_name")
+        }]
 
-    if not user_input["platform"]:
-        raise ValueError("Platform is required.")
+    if operation == "new_listing" and not products:
+        raise ValueError("Product information is required for new listings.")
 
-    if not user_input["operation"]:
-        raise ValueError("Operation is required.")
+    # For edit/bulk — if no specific product, use the original command as a browse instruction
+    # A human would just navigate the dashboard and find the product
+    if operation in {"edit_listing", "bulk_update"} and not products:
+        products = [{
+            "sku": "BROWSE",
+            "title": user_input.get("command", "Browse and find the product")
+        }]
 
-    operation = user_input["operation"].strip().lower()
-    data_file: Path | None = user_input["data_file"]
-    images_folder: Path | None = user_input["images_folder"]
+    async def cli_otp_callback() -> str:
+        print("\n" + "="*40)
+        print("🔐 2FA/OTP REQUIRED")
+        print("Please check your email or phone for a login code.")
+        print("="*40)
+        otp = input("Enter OTP Code: ").strip()
+        return otp
 
-    if operation == "new_listing" and not data_file:
-        raise ValueError("Product data file is required for new listings.")
-
-    products: list[dict[str, Any]] = []
-    if data_file:
-        products = load_product_data(data_file, strict=False)
-
-    llm = GeminiLLMEngine(api_key=settings.gemini_api_key)
-    browser = BrowserEngine(llm=llm, session_dir=settings.sessions_dir, headless=settings.browser_headless)
-
+    browser = BrowserEngine(llm=llm, session_dir=settings.sessions_dir, headless=settings.browser_headless, otp_callback=cli_otp_callback)
     credential_manager = CredentialManager(store_path=settings.credentials_store)
-    credentials = ensure_credentials(user_input["platform"], credential_manager)
+    credentials = ensure_credentials(platform_name, credential_manager)
 
-    workflow = llm.interpret_user_command(user_input["command"])
+    workflow = await llm.interpret_user_command(user_input["command"])
+    # workflow can override operation if it's more specific
     operation = str(workflow.get("operation") or operation).strip().lower()
 
-    if operation in {"edit_listing", "bulk_update"} and not products:
-        inferred_sku = workflow.get("sku")
-        if inferred_sku:
-            products = [{"sku": inferred_sku}]
-        else:
-            raise ValueError(
-                "No product data provided and no SKU could be inferred from instruction. "
-                "Provide a product file or include SKU in command."
-            )
-
-    platform = get_platform(user_input["platform"], browser)
+    platform = get_platform(platform_name, browser)
     context = await browser.start(platform.name.lower().replace(" ", "_"))
 
     try:
@@ -257,7 +285,11 @@ async def run() -> None:
                     await platform.create_listing(page, product, image_paths)
                 elif operation in {"edit_listing", "bulk_update"}:
                     updates = workflow.get("updates", {})
-                    await platform.edit_listing(page, updates=updates, sku=workflow.get("sku") or sku)
+                    # If we have a product name but no target_title in updates, use product name
+                    if product.get("title") and "target_title" not in updates:
+                        updates["target_title"] = product["title"]
+                    
+                    await platform.edit_listing(page, updates=updates, sku=sku)
                 else:
                     raise ValueError(f"Unsupported operation: {operation}")
             except Exception as product_error:

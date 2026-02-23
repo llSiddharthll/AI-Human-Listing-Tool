@@ -14,8 +14,11 @@ class LLMDrivenPlatform(PlatformBase):
     async def login(self, page: Page, credentials: dict[str, str]) -> None:
         await page.goto(self.login_url, wait_until="domcontentloaded")
         instruction = (
-            f"Log into {self.name} using these credentials: email/username={credentials.get('username', '')}, "
-            "password=<provided in secure manager>. If OTP/2FA appears, wait for human and continue."
+            f"Log into {self.name}. FIRST: Check if the screen shows a dashboard, product list, or 'Log Out' button "
+            "indicating you are ALREADY logged in. If so, return 'done' immediately. "
+            f"Otherwise, locate the login fields and enter: email/username={credentials.get('username', '')}, "
+            "password=<provided securely>. IMPORTANT: Find and check any 'Trust this device', 'Keep me signed in' "
+            "or 'Stay signed in' boxes to ensure future sessions are persisted. AVOID typing into search or filter boxes."
         )
         await self.browser.execute_llm_actions(page, instruction)
 
@@ -28,16 +31,22 @@ class LLMDrivenPlatform(PlatformBase):
         await self.upload_images(page, image_paths)
         await self.save_listing(page)
 
-    async def edit_listing(self, page: Page, updates: dict[str, Any], sku: str) -> None:
-        listing_reference = (
-            f"SKU {sku}" if sku and sku != "UNSPECIFIED" else "the listing identified by the provided command context"
-        )
+    async def edit_listing(self, page: Page, updates: dict[str, Any], sku: str = "UNSPECIFIED") -> None:
+        target_title = updates.get("target_title")
+        
+        if sku and sku != "UNSPECIFIED":
+            listing_reference = f"SKU {sku}"
+        elif target_title:
+            listing_reference = f"product with name/title '{target_title}'"
+        else:
+            listing_reference = "the listing identified by the provided command context"
+            
         instruction = (
             f"Find {listing_reference} on {self.name} and apply updates: {updates}. "
-            "Handle popups, layout changes, and validations."
+            "If searching by name, ensure you pick the most relevant match. "
+            "Handle popups, layout changes, and validations, and save the changes."
         )
         await self.browser.execute_llm_actions(page, instruction)
-        await self.save_listing(page)
 
     async def upload_images(self, page: Page, image_paths: list[Path]) -> None:
         for image_path in image_paths:

@@ -14,7 +14,7 @@ def load_product_data(file_path: Path, *, strict: bool = True) -> list[dict[str,
         raise FileNotFoundError(f"Product data file does not exist: {file_path}")
 
     if not file_path.suffix:
-        raise ValueError("Product data file must have a .json or .csv extension.")
+        raise ValueError("Product data file must have a .json, .csv, or .xlsx extension.")
 
     if file_path.suffix.lower() == ".json":
         data = json.loads(file_path.read_text())
@@ -22,8 +22,15 @@ def load_product_data(file_path: Path, *, strict: bool = True) -> list[dict[str,
     elif file_path.suffix.lower() == ".csv":
         with file_path.open("r", newline="", encoding="utf-8") as handle:
             products = list(csv.DictReader(handle))
+    elif file_path.suffix.lower() == ".xlsx":
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError("pandas and openpyxl are required to read .xlsx files")
+        df = pd.read_excel(file_path).fillna("")
+        products = df.to_dict(orient="records")
     else:
-        raise ValueError("Only JSON or CSV product data files are supported.")
+        raise ValueError("Only JSON, CSV, or XLSX product data files are supported.")
 
     valid_products: list[dict[str, Any]] = []
     validation_errors: list[str] = []
